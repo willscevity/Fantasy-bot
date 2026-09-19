@@ -147,6 +147,10 @@ def yahoo_api_get(endpoint):
 
 
 # ── SLEEPER (no auth needed) ─────────────────────────────────────────────
+PLAYERS_CACHE_FILE = "sleeper_players.json"
+PLAYERS_CACHE_MAX_AGE_HOURS = 24
+
+
 def sleeper_get(endpoint):
     resp = requests.get(f"{SLEEPER_BASE}/{endpoint}")
     resp.raise_for_status()
@@ -158,11 +162,48 @@ def sleeper_current_week():
     return state["week"]
 
 
+def sleeper_load_player_map():
+    """Return {player_id: player_info}, using a local cache (the full
+    player list is ~5MB, so we only refresh it once a day)."""
+    if os.path.exists(PLAYERS_CACHE_FILE):
+        with open(PLAYERS_CACHE_FILE) as f:
+            cache = json.load(f)
+        fetched_at = datetime.fromisoformat(cache["fetched_at"])
+        age_hours = (datetime.now(timezone.utc) - fetched_at).total_seconds() / 3600
+        if age_hours < PLAYERS_CACHE_MAX_AGE_HOURS:
+            return cache["players"]
+
+    print("(Refreshing Sleeper player database — happens at most once a day...)")
+    players = sleeper_get("players/nfl")
+    with open(PLAYERS_CACHE_FILE, "w") as f:
+        json.dump(
+            {"fetched_at": datetime.now(timezone.utc).isoformat(), "players": players},
+            f,
+        )
+    return players
+
+
+def sleeper_player_label(pid, player_map):
+    info = player_map.get(pid)
+    if not info:
+        if pid and pid.isalpha():
+            return pid  # team defense, e.g. "BAL"
+        return f"Unknown ({pid})"
+    name = info.get("full_name") or f"{info.get('first_name', '')} {info.get('last_name', '')}".strip()
+    pos = info.get("position", "?")
+    team = info.get("team") or "FA"
+    tag = ""
+    if info.get("injury_status"):
+        tag = f" [{info['injury_status']}]"
+    return f"{name} ({pos}-{team}){tag}"
+
+
 def sleeper_report():
     print("\n" + "=" * 50)
     print("BNA (Sleeper) — Week", sleeper_current_week())
     print("=" * 50)
 
+    player_map = sleeper_load_player_map()
     rosters = sleeper_get(f"league/{SLEEPER_LEAGUE_ID}/rosters")
     users = sleeper_get(f"league/{SLEEPER_LEAGUE_ID}/users")
     week = sleeper_current_week()
@@ -170,18 +211,40 @@ def sleeper_report():
 
     user_map = {u["user_id"]: u.get("display_name", "Unknown") for u in users}
     roster_owner = {r["roster_id"]: user_map.get(r["owner_id"], "Unknown") for r in rosters}
+    roster_players = {r["roster_id"]: r.get("players", []) for r in rosters}
 
     for m in matchups:
         owner = roster_owner.get(m["roster_id"], "Unknown")
         starters = m.get("starters", [])
+        all_players = roster_players.get(m["roster_id"], [])
+        bench = [pid for pid in all_players if pid not in starters]
         points = m.get("players_points", {})
-        print(f"\n{owner} — projected/actual points so far: {m.get('points', 0)}")
+
+        print(f"\n{owner} — total so far: {m.get('points', 0)}")
+        print("  Starters:")
         for pid in starters:
             pts = points.get(pid, "-")
-            print(f"  {pid}: {pts} pts")
+            print(f"    {sleeper_player_label(pid, player_map)}: {pts} pts")
+        if bench:
+            print("  Bench:")
+            for pid in bench:
+                pts = points.get(pid, "-")
+                print(f"    {sleeper_player_label(pid, player_map)}: {pts} pts")
 
-    print("\n(Player IDs shown — cross-reference with Sleeper app for names,")
-    print("or I can extend this script to pull the full player-name map too.)")
+    # Trending adds league-wide, filtered to players not already rostered here —
+    # a real, data-driven pickup signal (no fabricated projections).
+    rostered_ids = {pid for players in roster_players.values() for pid in players}
+    try:
+        trending = sleeper_get("players/nfl/trending/add?lookback_hours=48&limit=50")
+    except requests.RequestException:
+        trending = []
+    available_trending = [t for t in trending if t["player_id"] not in rostered_ids][:10]
+    if available_trending:
+        print("\n" + "-" * 50)
+        print("Trending waiver adds NOT currently on a roster in this league:")
+        for t in available_trending:
+            label = sleeper_player_label(t["player_id"], player_map)
+            print(f"  {label} — added by {t['count']} teams league-wide (last 48h)")
 
 
 # ── YAHOO ─────────────────────────────────────────────────────────────────

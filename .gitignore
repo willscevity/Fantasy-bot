@@ -1,4 +1,5 @@
 .env
 yahoo_tokens.json
+sleeper_players.json
 __pycache__/
 *.pyc
