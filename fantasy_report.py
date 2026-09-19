@@ -248,6 +248,48 @@ def sleeper_report():
 
 
 # ── YAHOO ─────────────────────────────────────────────────────────────────
+def _yahoo_merge_attrs(items):
+    """Yahoo's JSON represents an object's fields as a list of single-key
+    dicts (e.g. [{"league_key": "..."}, {"name": "..."}, ...]) — merge
+    that into one normal dict."""
+    merged = {}
+    for item in items:
+        if isinstance(item, dict):
+            merged.update(item)
+    return merged
+
+
+def yahoo_list_leagues():
+    """Debug helper: print every NFL fantasy league key the logged-in
+    Yahoo account belongs to, across all seasons. Use this to find the
+    correct YAHOO_LEAGUE_KEY (a plain 'nfl.l.XXXXX' key is not valid —
+    it needs the numeric per-season game key, e.g. '449.l.XXXXX')."""
+    data = yahoo_api_get("users;use_login=1/games;game_codes=nfl/leagues")
+    try:
+        users = data["fantasy_content"]["users"]["0"]["user"]
+        games = users[1]["games"]
+        print("\nYour Yahoo NFL leagues (league_key — name):")
+        found_any = False
+        for gi in range(games["count"]):
+            game = games[str(gi)]["game"]
+            leagues = None
+            for part in game:
+                if isinstance(part, dict) and "leagues" in part:
+                    leagues = part["leagues"]
+            if not leagues:
+                continue
+            for li in range(leagues["count"]):
+                league_attrs = _yahoo_merge_attrs(leagues[str(li)]["league"][0])
+                print(f"  {league_attrs.get('league_key')} — {league_attrs.get('name')}")
+                found_any = True
+        if not found_any:
+            print("  (none found — dumping raw response below for troubleshooting)")
+            print(json.dumps(data, indent=2)[:3000])
+    except (KeyError, IndexError, TypeError):
+        print("\nCouldn't parse the expected structure — here's the raw response instead:")
+        print(json.dumps(data, indent=2)[:3000])
+
+
 def yahoo_report():
     if not YAHOO_LEAGUE_KEY:
         print("\nAmsterdam (Yahoo) — skipped: YAHOO_LEAGUE_KEY not set yet.")
@@ -269,12 +311,15 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--auth", action="store_true", help="Print Yahoo auth URL")
     parser.add_argument("--code", type=str, help="Exchange Yahoo auth code for tokens")
+    parser.add_argument("--leagues", action="store_true", help="List your Yahoo NFL league keys")
     args = parser.parse_args()
 
     if args.auth:
         yahoo_print_auth_url()
     elif args.code:
         yahoo_exchange_code(args.code)
+    elif args.leagues:
+        yahoo_list_leagues()
     else:
         sleeper_report()
         yahoo_report()
